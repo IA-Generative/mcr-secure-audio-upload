@@ -1,0 +1,357 @@
+##############################################################################
+# Zone Externe - Deployments & Services
+##############################################################################
+
+# ── Code Generator ──────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: code-generator
+  namespace: audio-external
+  labels:
+    app: code-generator
+    tier: frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: code-generator
+  template:
+    metadata:
+      labels:
+        app: code-generator
+        tier: frontend
+    spec:
+      containers:
+        - name: code-generator
+          image: rg.fr-par.scw.cloud/funcscwnspricelessmontalcinhiacgnzi/secure-audio-upload:latest
+          command: ["python", "-m", "app.main"]
+          workingDir: /app/services/code-generator
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - secretRef:
+                name: external-db-secret
+            - secretRef:
+                name: oidc-secret
+          env:
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: app-secret
+                  key: SECRET_KEY
+            - name: UPLOAD_PORTAL_BASE_URL
+              value: "https://upload.outgate-claude.synchro.fake-domain.name"
+            - name: CODE_TTL_MINUTES
+              value: "15"
+            - name: MAX_UPLOADS_PER_SESSION
+              value: "5"
+            - name: TOKEN_ISSUER_API_URL
+              value: "http://token-issuer.audio-internal.svc.cluster.local:8091/api/v1/issue-token"
+            - name: INTERNAL_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: internal-api-secret
+                  key: INTERNAL_API_TOKEN
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: code-generator
+  namespace: audio-external
+spec:
+  selector:
+    app: code-generator
+  ports:
+    - port: 8080
+      targetPort: 8080
+  type: ClusterIP
+---
+# ── Upload Portal ───────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: upload-portal
+  namespace: audio-external
+  labels:
+    app: upload-portal
+    tier: frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: upload-portal
+  template:
+    metadata:
+      labels:
+        app: upload-portal
+        tier: frontend
+    spec:
+      containers:
+        - name: upload-portal
+          image: rg.fr-par.scw.cloud/funcscwnspricelessmontalcinhiacgnzi/secure-audio-upload:latest
+          command: ["python", "-m", "app.main"]
+          workingDir: /app/services/upload-portal
+          ports:
+            - containerPort: 8081
+          envFrom:
+            - secretRef:
+                name: external-db-secret
+            - secretRef:
+                name: s3-upload-secret
+            - secretRef:
+                name: rabbitmq-secret
+          env:
+            - name: UPLOAD_PORTAL_PORT
+              value: "8081"
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: upload-portal
+  namespace: audio-external
+spec:
+  selector:
+    app: upload-portal
+  ports:
+    - port: 8081
+      targetPort: 8081
+  type: ClusterIP
+---
+# ── Antivirus Worker ────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: antivirus-worker
+  namespace: audio-external
+  labels:
+    app: antivirus-worker
+    tier: worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: antivirus-worker
+  template:
+    metadata:
+      labels:
+        app: antivirus-worker
+        tier: worker
+    spec:
+      containers:
+        - name: antivirus-worker
+          image: rg.fr-par.scw.cloud/funcscwnspricelessmontalcinhiacgnzi/secure-audio-upload:latest
+          command: ["python", "-m", "app.main"]
+          workingDir: /app/services/antivirus-worker
+          envFrom:
+            - secretRef:
+                name: external-db-secret
+            - secretRef:
+                name: s3-upload-secret
+            - secretRef:
+                name: rabbitmq-secret
+          env:
+            - name: CLAMAV_HOST
+              value: clamav
+            - name: CLAMAV_PORT
+              value: "3310"
+            - name: UPLOAD_PORTAL_INTERNAL_URL
+              value: "http://upload-portal:8081"
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+---
+# ── Transcode Worker ────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: transcode-worker
+  namespace: audio-external
+  labels:
+    app: transcode-worker
+    tier: worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: transcode-worker
+  template:
+    metadata:
+      labels:
+        app: transcode-worker
+        tier: worker
+    spec:
+      containers:
+        - name: transcode-worker
+          image: rg.fr-par.scw.cloud/funcscwnspricelessmontalcinhiacgnzi/secure-audio-upload:latest
+          command: ["python", "-m", "app.main"]
+          workingDir: /app/services/transcode-worker
+          envFrom:
+            - secretRef:
+                name: external-db-secret
+            - secretRef:
+                name: s3-upload-secret
+            - secretRef:
+                name: s3-processed-secret
+            - secretRef:
+                name: rabbitmq-secret
+          env:
+            - name: UPLOAD_PORTAL_INTERNAL_URL
+              value: "http://upload-portal:8081"
+            - name: FFMPEG_AUDIO_FILTER
+              value: "highpass=f=80,lowpass=f=8000,loudnorm=I=-16:TP=-1.5:LRA=11"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 1Gi
+---
+# ── File Mover (Notificateur) ──────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: file-mover
+  namespace: audio-external
+  labels:
+    app: file-mover
+    tier: worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: file-mover
+  template:
+    metadata:
+      labels:
+        app: file-mover
+        tier: worker
+    spec:
+      containers:
+        - name: file-mover
+          image: rg.fr-par.scw.cloud/funcscwnspricelessmontalcinhiacgnzi/secure-audio-upload:latest
+          command: ["python", "-m", "app.main"]
+          workingDir: /app/services/file-mover
+          envFrom:
+            - secretRef:
+                name: external-db-secret
+            - secretRef:
+                name: rabbitmq-secret
+            - secretRef:
+                name: internal-api-secret
+          env:
+            - name: INTERNAL_API_URL
+              value: "http://file-puller.audio-internal.svc.cluster.local:8090/api/v1/pull"
+            - name: UPLOAD_PORTAL_INTERNAL_URL
+              value: "http://upload-portal:8081"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+# ── ClamAV ──────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clamav
+  namespace: audio-external
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: clamav
+  template:
+    metadata:
+      labels:
+        app: clamav
+    spec:
+      containers:
+        - name: clamav
+          image: clamav/clamav:1.3
+          ports:
+            - containerPort: 3310
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clamav
+  namespace: audio-external
+spec:
+  selector:
+    app: clamav
+  ports:
+    - port: 3310
+      targetPort: 3310
+---
+# ── Ingress ─────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: external-ingress
+  namespace: audio-external
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  tls:
+    - hosts:
+        - outgate-claude.synchro.fake-domain.name
+        - upload.outgate-claude.synchro.fake-domain.name
+      secretName: audio-tls
+  rules:
+    - host: outgate-claude.synchro.fake-domain.name
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: code-generator
+                port:
+                  number: 8080
+    - host: upload.outgate-claude.synchro.fake-domain.name
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: upload-portal
+                port:
+                  number: 8081

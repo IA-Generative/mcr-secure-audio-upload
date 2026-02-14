@@ -1,0 +1,271 @@
+##############################################################################
+# Zone Interne - Deployments & Services
+# SECURITY: No Ingress. Only file-puller and token-issuer accept traffic
+# from external zone via NetworkPolicy.
+##############################################################################
+
+# ── Token Issuer (autorité de génération des tokens) ───────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: token-issuer
+  namespace: audio-internal
+  labels:
+    app: token-issuer
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: token-issuer
+  template:
+    metadata:
+      labels:
+        app: token-issuer
+    spec:
+      containers:
+        - name: token-issuer
+          image: rg.fr-par.scw.cloud/funcscwnspricelessmontalcinhiacgnzi/secure-audio-upload:latest
+          command: ["python", "-m", "app.main"]
+          workingDir: /app/services/token-issuer
+          ports:
+            - containerPort: 8091
+          envFrom:
+            - secretRef:
+                name: internal-db-secret
+            - secretRef:
+                name: internal-api-secret
+          env:
+            - name: TOKEN_ISSUER_PORT
+              value: "8091"
+            - name: CODE_TTL_MINUTES
+              value: "15"
+            - name: CODE_TTL_MAX_MINUTES
+              value: "4320"
+            - name: MAX_UPLOADS_PER_SESSION
+              value: "5"
+            - name: CODE_LENGTH
+              value: "6"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8091
+            initialDelaySeconds: 5
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: token-issuer
+  namespace: audio-internal
+spec:
+  selector:
+    app: token-issuer
+  ports:
+    - port: 8091
+      targetPort: 8091
+  type: ClusterIP
+---
+# ── File Puller (seul point d'entrée) ──────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: file-puller
+  namespace: audio-internal
+  labels:
+    app: file-puller
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: file-puller
+  template:
+    metadata:
+      labels:
+        app: file-puller
+    spec:
+      containers:
+        - name: file-puller
+          image: rg.fr-par.scw.cloud/funcscwnspricelessmontalcinhiacgnzi/secure-audio-upload:latest
+          command: ["python", "-m", "app.puller"]
+          workingDir: /app/services/file-mover
+          ports:
+            - containerPort: 8090
+          envFrom:
+            - secretRef:
+                name: internal-db-secret
+            - secretRef:
+                name: s3-internal-secret
+            - secretRef:
+                name: internal-api-secret
+          env:
+            - name: FILE_PULLER_PORT
+              value: "8090"
+            - name: S3_PROCESSED_ENDPOINT
+              value: "https://s3-processed.outgate-claude.synchro.fake-domain.name"
+            - name: S3_PROCESSED_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: s3-processed-pull-secret
+                  key: access_key
+            - name: S3_PROCESSED_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: s3-processed-pull-secret
+                  key: secret_key
+            - name: S3_PROCESSED_BUCKET
+              value: processed-staging
+            - name: EXTERNAL_CALLBACK_URL
+              value: "http://upload-portal.audio-external.svc.cluster.local:8081/api/notify-status"
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8090
+            initialDelaySeconds: 5
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: file-puller
+  namespace: audio-internal
+spec:
+  selector:
+    app: file-puller
+  ports:
+    - port: 8090
+      targetPort: 8090
+  type: ClusterIP
+---
+# ── Transcription Stub Worker ──────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: transcription-stub
+  namespace: audio-internal
+  labels:
+    app: transcription-stub
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: transcription-stub
+  template:
+    metadata:
+      labels:
+        app: transcription-stub
+    spec:
+      containers:
+        - name: transcription-stub
+          image: rg.fr-par.scw.cloud/funcscwnspricelessmontalcinhiacgnzi/secure-audio-upload:latest
+          command: ["python", "-m", "app.main"]
+          workingDir: /app/services/transcription-stub
+          envFrom:
+            - secretRef:
+                name: internal-db-secret
+          env:
+            - name: RABBITMQ_HOST
+              value: rabbitmq.audio-internal.svc.cluster.local
+            - name: RABBITMQ_PORT
+              value: "5672"
+            - name: RABBITMQ_USER
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-internal-secret
+                  key: user
+            - name: RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-internal-secret
+                  key: password
+            - name: RABBITMQ_VHOST
+              value: audio_pipeline
+            - name: TRANSCRIPTION_SIMULATE_DELAY_SECONDS
+              value: "5"
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+---
+# ── PostgreSQL Interne ─────────────────────────────────────
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-internal
+  namespace: audio-internal
+spec:
+  serviceName: postgres-internal
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-internal
+  template:
+    metadata:
+      labels:
+        app: postgres-internal
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: audio_upload_int
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: internal-db-secret
+                  key: INT_DB_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: internal-db-secret
+                  key: INT_DB_PASSWORD
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: pgdata
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-internal
+  namespace: audio-internal
+spec:
+  selector:
+    app: postgres-internal
+  ports:
+    - port: 5432
+      targetPort: 5432
+  clusterIP: None
