@@ -43,7 +43,7 @@ spec:
             - name: CODE_TTL_MAX_MINUTES
               value: "10080"
             - name: MAX_UPLOADS_PER_SESSION
-              value: "5"
+              value: "15"
             - name: CODE_LENGTH
               value: "6"
           resources:
