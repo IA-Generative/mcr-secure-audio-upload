@@ -13,7 +13,7 @@ metadata:
   labels:
     app: token-issuer
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: token-issuer
@@ -25,7 +25,8 @@ spec:
       containers:
         - name: token-issuer
           image: rg.fr-par.scw.cloud/funcscwnspricelessmontalcinhiacgnzi/secure-audio-upload:latest
-          command: ["python", "-m", "app.main"]
+          imagePullPolicy: Always
+          command: ["gunicorn", "-w", "2", "--timeout", "300", "-b", "0.0.0.0:8091", "app.main:application"]
           workingDir: /app/services/token-issuer
           ports:
             - containerPort: 8091
@@ -81,7 +82,7 @@ metadata:
   labels:
     app: file-puller
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: file-puller
@@ -93,7 +94,8 @@ spec:
       containers:
         - name: file-puller
           image: rg.fr-par.scw.cloud/funcscwnspricelessmontalcinhiacgnzi/secure-audio-upload:latest
-          command: ["python", "-m", "app.puller"]
+          imagePullPolicy: Always
+          command: ["gunicorn", "-w", "2", "--timeout", "300", "-b", "0.0.0.0:8090", "app.puller:application"]
           workingDir: /app/services/file-mover
           ports:
             - containerPort: 8090
@@ -107,8 +109,24 @@ spec:
           env:
             - name: FILE_PULLER_PORT
               value: "8090"
+            - name: RABBITMQ_HOST
+              value: "rabbitmq.audio-external.svc.cluster.local"
+            - name: RABBITMQ_PORT
+              value: "5672"
+            - name: RABBITMQ_USER
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-internal-secret
+                  key: user
+            - name: RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-internal-secret
+                  key: password
+            - name: RABBITMQ_VHOST
+              value: "audio_pipeline"
             - name: S3_PROCESSED_ENDPOINT
-              value: "https://s3-processed.outgate-claude.synchro.fake-domain.name"
+              value: "https://audio-upload.s3.fr-par.scw.cloud"
             - name: S3_PROCESSED_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
@@ -120,7 +138,7 @@ spec:
                   name: s3-processed-pull-secret
                   key: secret_key
             - name: S3_PROCESSED_BUCKET
-              value: processed-staging
+              value: audio-processed
             - name: EXTERNAL_CALLBACK_URL
               value: "http://upload-portal.audio-external.svc.cluster.local:8081/api/notify-status"
           resources:
@@ -150,6 +168,32 @@ spec:
       targetPort: 8090
   type: ClusterIP
 ---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: file-puller-hpa
+  namespace: audio-internal
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: file-puller
+  minReplicas: 1
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+---
 # ── Transcription Stub Worker ──────────────────────────────
 apiVersion: apps/v1
 kind: Deployment
@@ -159,7 +203,7 @@ metadata:
   labels:
     app: transcription-stub
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: transcription-stub
@@ -171,6 +215,7 @@ spec:
       containers:
         - name: transcription-stub
           image: rg.fr-par.scw.cloud/funcscwnspricelessmontalcinhiacgnzi/secure-audio-upload:latest
+          imagePullPolicy: Always
           command: ["python", "-m", "app.main"]
           workingDir: /app/services/transcription-stub
           envFrom:
@@ -178,7 +223,7 @@ spec:
                 name: internal-db-secret
           env:
             - name: RABBITMQ_HOST
-              value: rabbitmq.audio-internal.svc.cluster.local
+              value: rabbitmq.audio-external.svc.cluster.local
             - name: RABBITMQ_PORT
               value: "5672"
             - name: RABBITMQ_USER
@@ -202,6 +247,40 @@ spec:
             limits:
               cpu: 1000m
               memory: 512Mi
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: transcription-rabbitmq-auth
+  namespace: audio-internal
+spec:
+  secretTargetRef:
+    - parameter: host
+      name: rabbitmq-keda-secret
+      key: host
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: transcription-stub-scaledobject
+  namespace: audio-internal
+spec:
+  scaleTargetRef:
+    name: transcription-stub
+  pollingInterval: 5
+  cooldownPeriod: 60
+  minReplicaCount: 1
+  maxReplicaCount: 20
+  triggers:
+    - type: rabbitmq
+      metadata:
+        protocol: amqp
+        queueName: transcription
+        mode: QueueLength
+        value: "1"
+        activationValue: "1"
+      authenticationRef:
+        name: transcription-rabbitmq-auth
 ---
 # ── PostgreSQL Interne ─────────────────────────────────────
 apiVersion: apps/v1
@@ -238,6 +317,8 @@ spec:
                 secretKeyRef:
                   name: internal-db-secret
                   key: INT_DB_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
           volumeMounts:
             - name: pgdata
               mountPath: /var/lib/postgresql/data

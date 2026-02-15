@@ -12,7 +12,7 @@ metadata:
     app: code-generator
     tier: frontend
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: code-generator
@@ -25,7 +25,8 @@ spec:
       containers:
         - name: code-generator
           image: rg.fr-par.scw.cloud/funcscwnspricelessmontalcinhiacgnzi/secure-audio-upload:latest
-          command: ["python", "-m", "app.main"]
+          imagePullPolicy: Always
+          command: ["gunicorn", "-w", "2", "--timeout", "300", "-b", "0.0.0.0:8080", "app.main:application"]
           workingDir: /app/services/code-generator
           ports:
             - containerPort: 8080
@@ -34,6 +35,10 @@ spec:
                 name: external-db-secret
             - secretRef:
                 name: oidc-secret
+            - secretRef:
+                name: s3-upload-secret
+            - secretRef:
+                name: s3-processed-secret
           env:
             - name: SECRET_KEY
               valueFrom:
@@ -41,7 +46,7 @@ spec:
                   name: app-secret
                   key: SECRET_KEY
             - name: UPLOAD_PORTAL_BASE_URL
-              value: "https://upload.outgate-claude.synchro.fake-domain.name"
+              value: "https://import-audio.fake-domain.name"
             - name: CODE_TTL_MINUTES
               value: "15"
             - name: MAX_UPLOADS_PER_SESSION
@@ -53,6 +58,28 @@ spec:
                 secretKeyRef:
                   name: internal-api-secret
                   key: INTERNAL_API_TOKEN
+            - name: S3_INTERNAL_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: s3-processed-secret
+                  key: S3_PROCESSED_ENDPOINT
+            - name: S3_INTERNAL_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: s3-processed-secret
+                  key: S3_PROCESSED_REGION
+            - name: S3_INTERNAL_BUCKET
+              value: "audio-internal"
+            - name: S3_INTERNAL_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: s3-processed-secret
+                  key: S3_PROCESSED_ACCESS_KEY
+            - name: S3_INTERNAL_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: s3-processed-secret
+                  key: S3_PROCESSED_SECRET_KEY
           resources:
             requests:
               cpu: 100m
@@ -66,6 +93,12 @@ spec:
               port: 8080
             initialDelaySeconds: 10
             periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
 ---
 apiVersion: v1
 kind: Service
@@ -80,6 +113,93 @@ spec:
       targetPort: 8080
   type: ClusterIP
 ---
+# ── Admin Portal (OIDC + Monitoring) ──────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: admin-portal
+  namespace: audio-external
+  labels:
+    app: admin-portal
+    tier: frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: admin-portal
+  template:
+    metadata:
+      labels:
+        app: admin-portal
+        tier: frontend
+    spec:
+      containers:
+        - name: admin-portal
+          image: rg.fr-par.scw.cloud/funcscwnspricelessmontalcinhiacgnzi/secure-audio-upload:latest
+          imagePullPolicy: Always
+          command: ["gunicorn", "-w", "2", "--timeout", "300", "-b", "0.0.0.0:8082", "app.main:application"]
+          workingDir: /app/services/admin-portal
+          ports:
+            - containerPort: 8082
+          envFrom:
+            - secretRef:
+                name: app-secret
+            - secretRef:
+                name: oidc-secret
+            - secretRef:
+                name: external-db-secret
+            - secretRef:
+                name: admin-int-db-secret
+            - secretRef:
+                name: s3-upload-secret
+            - secretRef:
+                name: s3-processed-secret
+          env:
+            - name: OIDC_REDIRECT_URI
+              value: "https://qrcode-import.fake-domain.name/admin/auth/callback"
+            - name: OIDC_INTERNAL_ISSUER
+              value: "https://openwebui-sso.fake-domain.name/realms/audio-upload"
+            - name: ADMIN_PORTAL_PORT
+              value: "8082"
+            - name: ADMIN_BASE_PATH
+              value: "/admin"
+            - name: ADMIN_ALLOWED_USERS
+              value: "admin,admin@example.com"
+            - name: S3_INTERNAL_ENDPOINT
+              value: "https://audio-upload.s3.fr-par.scw.cloud"
+            - name: S3_INTERNAL_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: s3-processed-secret
+                  key: S3_PROCESSED_ACCESS_KEY
+            - name: S3_INTERNAL_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: s3-processed-secret
+                  key: S3_PROCESSED_SECRET_KEY
+            - name: S3_INTERNAL_BUCKET
+              value: "audio-internal"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: admin-portal
+  namespace: audio-external
+spec:
+  selector:
+    app: admin-portal
+  ports:
+    - port: 8082
+      targetPort: 8082
+  type: ClusterIP
+---
 # ── Upload Portal ───────────────────────────────────────────
 apiVersion: apps/v1
 kind: Deployment
@@ -90,7 +210,7 @@ metadata:
     app: upload-portal
     tier: frontend
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: upload-portal
@@ -103,7 +223,8 @@ spec:
       containers:
         - name: upload-portal
           image: rg.fr-par.scw.cloud/funcscwnspricelessmontalcinhiacgnzi/secure-audio-upload:latest
-          command: ["python", "-m", "app.main"]
+          imagePullPolicy: Always
+          command: ["gunicorn", "-k", "eventlet", "-w", "1", "--timeout", "300", "-b", "0.0.0.0:8081", "app.main:application"]
           workingDir: /app/services/upload-portal
           ports:
             - containerPort: 8081
@@ -113,7 +234,11 @@ spec:
             - secretRef:
                 name: s3-upload-secret
             - secretRef:
+                name: s3-processed-secret
+            - secretRef:
                 name: rabbitmq-secret
+            - secretRef:
+                name: internal-api-secret
           env:
             - name: UPLOAD_PORTAL_PORT
               value: "8081"
@@ -148,7 +273,7 @@ metadata:
     app: antivirus-worker
     tier: worker
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: antivirus-worker
@@ -161,6 +286,7 @@ spec:
       containers:
         - name: antivirus-worker
           image: rg.fr-par.scw.cloud/funcscwnspricelessmontalcinhiacgnzi/secure-audio-upload:latest
+          imagePullPolicy: Always
           command: ["python", "-m", "app.main"]
           workingDir: /app/services/antivirus-worker
           envFrom:
@@ -170,6 +296,8 @@ spec:
                 name: s3-upload-secret
             - secretRef:
                 name: rabbitmq-secret
+            - secretRef:
+                name: internal-api-secret
           env:
             - name: CLAMAV_HOST
               value: clamav
@@ -195,7 +323,7 @@ metadata:
     app: transcode-worker
     tier: worker
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: transcode-worker
@@ -208,6 +336,7 @@ spec:
       containers:
         - name: transcode-worker
           image: rg.fr-par.scw.cloud/funcscwnspricelessmontalcinhiacgnzi/secure-audio-upload:latest
+          imagePullPolicy: Always
           command: ["python", "-m", "app.main"]
           workingDir: /app/services/transcode-worker
           envFrom:
@@ -219,6 +348,8 @@ spec:
                 name: s3-processed-secret
             - secretRef:
                 name: rabbitmq-secret
+            - secretRef:
+                name: internal-api-secret
           env:
             - name: UPLOAD_PORTAL_INTERNAL_URL
               value: "http://upload-portal:8081"
@@ -231,6 +362,63 @@ spec:
             limits:
               cpu: 2000m
               memory: 1Gi
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: transcode-rabbitmq-auth
+  namespace: audio-external
+spec:
+  secretTargetRef:
+    - parameter: host
+      name: rabbitmq-keda-secret
+      key: host
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: transcode-worker-scaledobject
+  namespace: audio-external
+spec:
+  scaleTargetRef:
+    name: transcode-worker
+  pollingInterval: 5
+  cooldownPeriod: 60
+  minReplicaCount: 1
+  maxReplicaCount: 50
+  triggers:
+    - type: rabbitmq
+      metadata:
+        protocol: amqp
+        queueName: transcode
+        mode: QueueLength
+        value: "1"
+        activationValue: "1"
+      authenticationRef:
+        name: transcode-rabbitmq-auth
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: file-mover-scaledobject
+  namespace: audio-external
+spec:
+  scaleTargetRef:
+    name: file-mover
+  pollingInterval: 5
+  cooldownPeriod: 60
+  minReplicaCount: 1
+  maxReplicaCount: 50
+  triggers:
+    - type: rabbitmq
+      metadata:
+        protocol: amqp
+        queueName: file_ready
+        mode: QueueLength
+        value: "1"
+        activationValue: "1"
+      authenticationRef:
+        name: transcode-rabbitmq-auth
 ---
 # ── File Mover (Notificateur) ──────────────────────────────
 apiVersion: apps/v1
@@ -255,6 +443,7 @@ spec:
       containers:
         - name: file-mover
           image: rg.fr-par.scw.cloud/funcscwnspricelessmontalcinhiacgnzi/secure-audio-upload:latest
+          imagePullPolicy: Always
           command: ["python", "-m", "app.main"]
           workingDir: /app/services/file-mover
           envFrom:
@@ -269,6 +458,8 @@ spec:
               value: "http://file-puller.audio-internal.svc.cluster.local:8090/api/v1/pull"
             - name: UPLOAD_PORTAL_INTERNAL_URL
               value: "http://upload-portal:8081"
+            - name: PULL_REQUEST_TIMEOUT_SECONDS
+              value: "90"
           resources:
             requests:
               cpu: 100m
@@ -295,7 +486,7 @@ spec:
     spec:
       containers:
         - name: clamav
-          image: clamav/clamav:1.3
+          image: clamav/clamav-debian:latest
           ports:
             - containerPort: 3310
           resources:
@@ -318,6 +509,139 @@ spec:
     - port: 3310
       targetPort: 3310
 ---
+# ── RabbitMQ (Zone Externe) ────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rabbitmq
+  namespace: audio-external
+  labels:
+    app: rabbitmq
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rabbitmq
+  template:
+    metadata:
+      labels:
+        app: rabbitmq
+    spec:
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:3.13-management-alpine
+          ports:
+            - containerPort: 5672
+            - containerPort: 15672
+          env:
+            - name: RABBITMQ_DEFAULT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-secret
+                  key: RABBITMQ_USER
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-secret
+                  key: RABBITMQ_PASSWORD
+            - name: RABBITMQ_DEFAULT_VHOST
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-secret
+                  key: RABBITMQ_VHOST
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  namespace: audio-external
+spec:
+  selector:
+    app: rabbitmq
+  ports:
+    - name: amqp
+      port: 5672
+      targetPort: 5672
+    - name: management
+      port: 15672
+      targetPort: 15672
+---
+# ── PostgreSQL Externe ─────────────────────────────────────
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-external
+  namespace: audio-external
+spec:
+  serviceName: postgres-external
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-external
+  template:
+    metadata:
+      labels:
+        app: postgres-external
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: audio_upload_ext
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: external-db-secret
+                  key: EXT_DB_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: external-db-secret
+                  key: EXT_DB_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: pgdata
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-external
+  namespace: audio-external
+spec:
+  selector:
+    app: postgres-external
+  ports:
+    - port: 5432
+      targetPort: 5432
+  clusterIP: None
+---
 # ── Ingress ─────────────────────────────────────────────────
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -331,11 +655,11 @@ metadata:
 spec:
   tls:
     - hosts:
-        - outgate-claude.synchro.fake-domain.name
-        - upload.outgate-claude.synchro.fake-domain.name
+        - qrcode-import.fake-domain.name
+        - import-audio.fake-domain.name
       secretName: audio-tls
   rules:
-    - host: outgate-claude.synchro.fake-domain.name
+    - host: qrcode-import.fake-domain.name
       http:
         paths:
           - path: /
@@ -345,7 +669,7 @@ spec:
                 name: code-generator
                 port:
                   number: 8080
-    - host: upload.outgate-claude.synchro.fake-domain.name
+    - host: import-audio.fake-domain.name
       http:
         paths:
           - path: /
@@ -355,3 +679,24 @@ spec:
                 name: upload-portal
                 port:
                   number: 8081
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: admin-path-ingress
+  namespace: audio-external
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+spec:
+  rules:
+    - host: qrcode-import.fake-domain.name
+      http:
+        paths:
+          - path: /admin(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: admin-portal
+                port:
+                  number: 8082

@@ -1,0 +1,23 @@
+{
+  "clientId": "audio-upload-app",
+  "name": "Audio Upload App",
+  "description": "Client OIDC pour le portail qrcode-import",
+  "protocol": "openid-connect",
+  "publicClient": false,
+  "secret": "CHANGE_ME_CLIENT_SECRET",
+  "standardFlowEnabled": true,
+  "directAccessGrantsEnabled": true,
+  "serviceAccountsEnabled": false,
+  "rootUrl": "https://qrcode-import.fake-domain.name",
+  "baseUrl": "https://qrcode-import.fake-domain.name",
+  "redirectUris": [
+    "https://qrcode-import.fake-domain.name/auth/callback",
+    "https://qrcode-import.fake-domain.name/*"
+  ],
+  "webOrigins": [
+    "https://qrcode-import.fake-domain.name"
+  ],
+  "attributes": {
+    "post.logout.redirect.uris": "https://qrcode-import.fake-domain.name/*"
+  }
+}
