@@ -48,11 +48,15 @@ spec:
             - name: UPLOAD_PORTAL_BASE_URL
               value: "https://import-audio.fake-domain.name"
             - name: CODE_TTL_MINUTES
-              value: "15"
+              value: "10080"
+            - name: CODE_TTL_MAX_MINUTES
+              value: "10080"
             - name: MAX_UPLOADS_PER_SESSION
               value: "5"
             - name: TOKEN_ISSUER_API_URL
               value: "http://token-issuer.audio-internal.svc.cluster.local:8091/api/v1/issue-token"
+            - name: TOKEN_ISSUER_INTERNAL_BASE_URL
+              value: "http://token-issuer.audio-internal.svc.cluster.local:8091"
             - name: INTERNAL_API_TOKEN
               valueFrom:
                 secretKeyRef:

@@ -39,9 +39,9 @@ spec:
             - name: TOKEN_ISSUER_PORT
               value: "8091"
             - name: CODE_TTL_MINUTES
-              value: "15"
+              value: "10080"
             - name: CODE_TTL_MAX_MINUTES
-              value: "4320"
+              value: "10080"
             - name: MAX_UPLOADS_PER_SESSION
               value: "5"
             - name: CODE_LENGTH
